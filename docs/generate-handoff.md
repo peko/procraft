@@ -1,0 +1,131 @@
+# Generate (ComfyUI) — handoff
+
+State on 2026-11-13. The **Generate** feature works end to end on the desktop app and on the Android tablet,
+but **nothing is committed yet** (`git status` shows it all as modified or untracked on `main`).
+
+## What it is
+
+A ComfyUI binding for ProCraft, a much simpler take on
+[krita-ai-diffusion](../../krita-ai-diffusion) (the user's own fork, with MOSS support, is at `~/lab/krita-ai-diffusion`).
+The user's flow:
+
+1. Set the ComfyUI server address.
+2. Choose one of the special workflows kept on the server.
+3. Draw a sketch, type a prompt, choose a strength.
+4. Press the button, and the result lands as a new layer (one undo step).
+
+It's native, not a plugin. ProCraft plugins (`docs/plugins.md`) are sandboxed wasm: they have no network or
+clock, actions are capped at 20 s, and panels have no text input. The user agreed to the native approach. A
+`comfyui` plugin permission could expose it to plugins later.
+
+## Decisions the user made
+
+- Keep it simple: no model, LoRA or workflow building in the app, only fixed workflows prepared on the server.
+- Workflows are in **API format** ("Export (API)") under the server's `user/default/workflows/procraft/*.json`.
+  Editor-format files (with subgraphs) are refused with a reason.
+- Nodes are bound by title (`_meta.title`, one or several roles separated by spaces):
+  `procraft:image` (LoadImage), `procraft:prompt`, `procraft:negative`, `procraft:strength` (sets `denoise`, else
+  `image_strength`, else `strength`), `procraft:seed` (`seed`/`noise_seed`), `procraft:size` (width/height:
+  the canvas proportions at about 1 MP, multiples of 16).
+  - Without titles, the first LoadImage, the first text encoder, and every sampler's seed are used.
+  - A prompt node whose text contains `{prompt}` keeps its text, with the prompt put in place of the
+    placeholder (quality tags).
+  - An empty negative keeps the workflow's own.
+- MVP is text → image and image → image (refine). There is no inpainting or Live mode yet.
+- Desktop first, then Android. Both are done.
+- Button: a **tap** generates with the last settings. If no workflow is chosen yet, or a job is running, the
+  tap opens the panel instead. A **hold** (0.4 s) opens the panel.
+  - The button is animated: a spinning arc while queued, a filling ring while running, a pulsing sparkle, and
+    a green or red ring for 2 s when the job ends.
+  - With the panel closed, a badge under the button says Queued, 42%, Done or Failed.
+- Panel: two tabs.
+  - **Generate:** the model row (connection dot and host; tapping it opens Settings), prompt, strength (only
+    for sketch → image), seed (Random/Fixed), Generate/Cancel with %, and a status line.
+  - **Settings** (gear): server + Connect + status, the model list, and a negative prompt per model.
+
+## Code map
+
+| Where | What |
+|---|---|
+| `crates/core/src/comfy/client.rs` | HTTP (`ureq` 3.5, rustls+json) and websocket (`tungstenite` 0.30) client: list workflows (`GET /api/userdata?dir=workflows/procraft&recurse=true`), fetch one, multipart upload `/upload/image`, `POST /prompt`, `/history/{id}`, `/view`, cancel (`POST /queue {delete}` + `POST /interrupt {prompt_id}`), ComfyUI error messages made readable |
+| `crates/core/src/comfy/workflow.rs` | Pure binding logic (`describe`, `apply`, `megapixel_size`), unit-tested |
+| `crates/core/src/comfy/mod.rs` | The uniffi API: `comfy_workflows(server)`, `CanvasSession::comfy_generate(ComfyRequest) -> Arc<ComfyJob>` (reads the canvas on the calling thread via `finished_picture`, which was made `pub(crate)` in `project.rs`, then runs on a thread), `ComfyJob::{status, cancel, seed}`, `CanvasSession::comfy_put_result(job)` (new layer "AI: <prompt>", one undo step through `plugin_step`). Progress is weighted as krita does: 20 % nodes, 80 % sampler steps, never going back. Tests include ignored live tests `comfy_live` and `comfy_list_live` |
+| `crates/core/src/lib.rs` | `mod comfy;` and `pub use comfy::{…}` |
+| `desktop/src/generate.rs` | The desktop panel, `SPARKLE`/`GEAR` icons, the bar ring (`draw_status`, `pulse`), the badge, and saved settings in `~/.local/share/procraft/generate.json` |
+| `desktop/src/{chrome,ui,look,main}.rs` | `BarButton::Generate`, `Popover::Generate`, the hold via `tool_hold`, bar spacing for 5 action buttons |
+| `android/.../canvas/Generate.kt` | Android state, saved in SharedPreferences "generate"; follows the job on `viewModelScope` |
+| `android/.../ui/GenerateUi.kt` | `GenerateButton`, `GenerateBadge`, `GeneratePanel` (Compose) |
+| `android/.../canvas/CanvasViewModel.kt` | `Panel.GENERATE`, `val generate`, `putGenerated`, `generatePressed` |
+| `android/.../ui/{Chrome,AppRoot,Theme}.kt` | Button on the bar, panel placement (button index 4, from the left), `BarFit.needs` counting 5 actions |
+| `android/app/src/main/AndroidManifest.xml` | `INTERNET` + `usesCleartextTraffic="true"` |
+| `tools/comfy-workflows/*.json` | The four workflows installed on the server (copies) |
+
+## Environment (this machine)
+
+- Linux (Manjaro, X11), AMD Radeon 680M.
+- Desktop build: `cargo build --release -p procraft-desktop`, run `./target/release/procraft`.
+- Rust: user-local rustup is now installed (`~/.cargo/bin`, stable + `aarch64-linux-android` + clippy), and
+  cargo prefers it over Arch's `rust` 1.99.
+- `cargo-ndk` 4.1.2 is in `~/.cargo/bin`.
+- Android SDK at `~/Android/Sdk` (cmdline-tools, `platforms;android-37.0`, `build-tools;37.0.0`,
+  platform-tools). The NDK 29.0.14206865 is linked from `/opt/android-sdk/ndk`.
+  `android/local.properties` has `sdk.dir` (gitignored).
+- Android build:
+  `cd android && JAVA_HOME=/usr/lib/jvm/default ANDROID_HOME=$HOME/Android/Sdk ./gradlew assembleDebug -Pprocraft.abis=arm64-v8a`,
+  then `adb install -r app/build/outputs/apk/debug/app-debug.apk`. The package is
+  `io.github.artcraftandroid.procraft.debug`.
+- Tablet: MediaTek "ArtPadPro_ROW", Android 16 (API 36), arm64, 1600×2176, on Wi-Fi at 192.168.1.108 with
+  USB debugging authorized. It locks when asleep, so ask the user to unlock it before screenshots
+  (`adb exec-out screencap -p`).
+- Clippy is clean for `procraft-core` and `procraft-desktop`. 12 unit tests pass:
+  `cargo test -p procraft-core comfy`.
+  Live tests: `COMFY_URL=http://10.0.0.214:8188 COMFY_WORKFLOW=tools/comfy-workflows/moss-sketch.json COMFY_SKETCH=<png> cargo test -p procraft-core comfy_live -- --ignored --nocapture`.
+
+## The ComfyUI server
+
+- `10.0.0.214:8188` (wired LAN). ComfyUI 0.43.0, RTX 5060 Ti 16 GB, at `peko@10.0.0.214:~/lab/Diffusion/ComfyUI`.
+  SSH works. Copying files there was approved; other remote writes need the user's OK.
+- Workflows for ProCraft: `~/lab/Diffusion/ComfyUI/user/default/workflows/procraft/`, holding `moss-sketch`,
+  `moss-t2i`, `anima-sketch` and `anima-t2i`.
+- **MOSS:**
+  - Model `moss/moss_image_sft_int8_convrot` + LoRA `moss/turbo_sft_8step_dmd_v0_1`, CLIP
+    `moss/qwen3.5_9b_int8_convrot` (type `moss_image`), VAE `flux2-vae`, 8 steps, CFG 1, euler/simple.
+  - Includes `SkipLayerGuidanceDiTSimple` single_layers "22" (from the user's krita fork; only acts at CFG > 1).
+  - Useful strength is about **85–100 %**: at 60 % it's a copy of the sketch, at 95 % a full picture.
+- **Anima:**
+  - Model `anima/anima_turboV11` (turbo built in), CLIP `qwen306BBaseAnima_1` (type `stable_diffusion`), VAE
+    `qwen_image_vae`, 8 steps, CFG 1, euler/simple.
+  - Positive `masterpiece, best quality, score_7, highres, safe, {prompt}`; negative `worst quality, low
+    quality, score_1, score_2, score_3, blurry, jpeg artifacts, sepia`.
+  - Non-turbo Anima models need about 30 steps at CFG 4.
+- Timing: about 4–5 s per job with the model loaded, about 27–70 s when it has to load first.
+- **Tablet access:** the tablet is on Wi-Fi 192.168.1.0/24 and can't reach 10.0.0.x directly.
+  `~/ssh-local.sh` (rewritten this session) relays ports 8188/8000/5001 over SSH on `0.0.0.0` of this PC.
+  - The tablet uses **`192.168.1.227:8188`**, this PC's Wi-Fi address from DHCP, which can change.
+  - `~/ssh-local.sh relay` runs the relay only and reconnects by itself.
+  - Verified working: the user generated from the tablet through it.
+
+## Not done yet / next steps
+
+1. **Check the Seed row on the tablet** (installed, unseen because the tablet was locked) and on desktop (built,
+   not run).
+2. **Commit.** Nothing is committed. Use semantic commit messages (`feat(generate): …`), on a branch if
+   preferred.
+3. Ideas not yet asked for:
+   - inpainting inside the selection;
+   - Live mode;
+   - right-click on desktop to open the panel (proposed, not answered);
+   - a MOSS edit workflow (`TextEncodeMOSSImageEdit` with `edit_format "Moss-Image-Edit"`, `images.image_0`,
+     the edit adapter LoRA, denoise 1);
+   - more model workflows (copy a JSON and change `unet_name`);
+   - a `comfyui` plugin permission.
+4. `desktop/src/icons.rs` is generated from Android's `ui/Icons.kt`, so the Generate icons live in
+   `generate.rs` and `GenerateUi.kt` instead.
+
+## Cautions learned this session
+
+- Never drive the desktop with xdotool blindly. A click once landed in another window. Use a guard that checks
+  `xdotool getmouselocation` is over ProCraft's window before each click.
+- Read files before overwriting them. `~/.local/share/procraft/generate.json` was once overwritten unread.
+- `.private/` folders are off-limits (global rule).
+- On desktop, a tap on the Generate button with a workflow chosen starts a real job. Hold to open the panel.

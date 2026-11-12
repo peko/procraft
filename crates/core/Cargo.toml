@@ -43,6 +43,11 @@ uniffi = { version = "=0.32.2", default-features = false }
 # dispatch: the default's tail calls can overflow the stack on a long module, which ends the process.
 wasmi = { version = "2", default-features = false, features = ["std", "validate", "stable", "portable-dispatch"] }
 
+# Generate: a ComfyUI server asked over HTTP (its workflows, the canvas sent, the result taken back)
+# and its websocket for how far a job has come
+ureq = { version = "3.5", default-features = false, features = ["rustls", "json"] }
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = { version = "0.15", default-features = false }
 ndk = { version = "0.9", default-features = false }

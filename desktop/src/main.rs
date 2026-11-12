@@ -26,6 +26,7 @@ mod files;
 #[cfg(target_os = "macos")]
 mod finder;
 mod gallery;
+mod generate;
 mod gesture_controls;
 mod gradient_map;
 mod guide_editor;

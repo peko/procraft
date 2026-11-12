@@ -17,6 +17,7 @@ pub enum BarButton {
     Adjustments,
     Selection,
     Transform,
+    Generate,
     Paint,
     Smudge,
     Erase,
@@ -32,6 +33,9 @@ pub struct Lit {
     pub selection: bool,
     pub transform: bool,
     pub layers: bool,
+    pub generate: bool,
+    /// How the Generate button shows its job.
+    pub generate_status: crate::generate::BarStatus,
     /// A panel takes the highlight from the current tool while open.
     pub panel_open: bool,
 }
@@ -109,6 +113,7 @@ pub fn top_bar(ui: &mut Ui, look: &mut Look, tool: ToolKind, colour: Color32, br
             (BarButton::Adjustments, &icons::ADJUSTMENTS, 36.0, lit.adjustments),
             (BarButton::Selection, &icons::SELECTION, 33.0, lit.selection),
             (BarButton::Transform, &icons::TRANSFORM, 44.0, lit.transform),
+            (BarButton::Generate, &crate::generate::SPARKLE, 36.0, lit.generate),
         ];
         for (which, icon, glyph, on) in actions {
             let rect = button(x, pc::BAR_BUTTON_WIDTH);
@@ -116,7 +121,12 @@ pub fn top_bar(ui: &mut Ui, look: &mut Look, tool: ToolKind, colour: Color32, br
             let l = highlight(&ctx, ui.scope_id().with(("lit", which)), on);
             let disc = mix(argb(pc::ACTION_DISC), argb(pc::BAR_GLYPH_SELECTED), l);
             ui.painter().circle_filled(rect.center(), pc::ACTION_DISC_SIZE / 2.0, disc);
-            look.icon(ui, icon, rect.center(), glyph, mix(argb(pc::ACTION_GLYPH), Color32::WHITE, l));
+            // the Generate button's glyph pulses while its job runs, and its ring shows how far
+            let g = if which == BarButton::Generate { l.max(crate::generate::pulse(ui, lit.generate_status)) } else { l };
+            look.icon(ui, icon, rect.center(), glyph, mix(argb(pc::ACTION_GLYPH), Color32::WHITE, g));
+            if which == BarButton::Generate {
+                crate::generate::draw_status(ui, rect.center(), pc::ACTION_DISC_SIZE, lit.generate_status);
+            }
             x += pc::BAR_BUTTON_WIDTH + action_gap;
         }
 

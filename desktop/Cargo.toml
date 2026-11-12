@@ -29,6 +29,9 @@ rfd = "0.17"
 arboard = { version = "3.6", default-features = false, features = ["image-data"] }
 resvg = { version = "0.49", default-features = false }
 png = { workspace = true }
+# Generate's settings, kept as JSON
+serde = { workspace = true }
+serde_json = { workspace = true }
 # Photo's pictures (the clipboard already brings it in, with PNG and TIFF)
 # Canvas information's dates, in local time
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

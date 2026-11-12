@@ -74,6 +74,7 @@ enum Popover {
     Brushes,
     Layers,
     Colour,
+    Generate,
 }
 
 /// The background's colour picked in the colour panel: as the panel shows it (hue, saturation,
@@ -136,6 +137,7 @@ pub struct Interface {
     /// place.
     background_pick: Option<BackgroundPick>,
     pub(crate) colours: Colours,
+    generate: crate::generate::Generate,
     drop: ColourDrop,
     library: Library,
     overlays: Overlays,
@@ -257,6 +259,7 @@ impl Default for Interface {
             open: None,
             background_pick: None,
             colours: Colours::default(),
+            generate: crate::generate::Generate::default(),
             drop: ColourDrop::default(),
             library: Library::default(),
             overlays: Overlays::default(),
@@ -553,6 +556,8 @@ impl Interface {
         if let Some(opacity) = session.touch_layer_opacity().filter(|_| !self.bars_hidden) {
             crate::adjustments::layer_opacity_bar(&ctx, opacity, pc::BAR_HEIGHT);
         }
+        // the Generate job moves on whether or not its panel is open
+        self.generate.tick(&ctx, session);
         let lit = Lit {
             actions: self.open == Some(Popover::Actions),
             transform: self.transform.on,
@@ -562,6 +567,8 @@ impl Interface {
                 || session.recolor_on()
                 || session.touch_layer_opacity().is_some(),
             layers: self.open == Some(Popover::Layers),
+            generate: self.open == Some(Popover::Generate),
+            generate_status: self.generate.bar_status(),
             panel_open: matches!(self.open, Some(Popover::Layers | Popover::Colour)),
         };
         let colour = srgb(self.colours.rgb());
@@ -667,6 +674,12 @@ impl Interface {
         }
         let bar = crate::chrome::top_bar(ui, &mut self.look, info.tool, colour, self.colours.hsv[2], &lit);
         let held = self.tool_hold(&ctx, session, &bar);
+        // the Generate job's progress under its button, while its panel (which shows it) is closed
+        if self.open != Some(Popover::Generate)
+            && let Some(button) = bar.rect(BarButton::Generate)
+        {
+            crate::generate::badge(&ctx, button, self.generate.bar_status());
+        }
         match bar.pressed.filter(|_| !held) {
             Some(BarButton::Gallery) => self.actions.push(Action::Gallery),
             Some(BarButton::Actions) => self.toggle(session, Popover::Actions),
@@ -690,6 +703,7 @@ impl Interface {
             Some(BarButton::Transform) => self.toggle_transform(session),
             Some(BarButton::Selection) => self.toggle_selection(session),
             Some(BarButton::Adjustments) => self.adjustments_pressed(session),
+            Some(BarButton::Generate) => self.generate_tapped(session),
             Some(BarButton::Colour) | None => {}
         }
         // the colour button: tapped it opens the colours, held it goes back to the previous
@@ -772,6 +786,7 @@ impl Interface {
             Popover::Brushes => bar.rect(tool_button),
             Popover::Layers => bar.rect(BarButton::Layers),
             Popover::Colour => bar.rect(BarButton::Colour),
+            Popover::Generate => bar.rect(BarButton::Generate),
         };
         // it opens as the adjustments, however it was left
         if self.open != Some(Popover::Adjustments) {
@@ -2104,13 +2119,18 @@ impl Interface {
             BarButton::Erase => Some(ToolKind::Erase),
             _ => None,
         };
-        if let Some((target, since)) = bar.down.and_then(|(b, since)| tool(b).map(|t| (t, since)))
+        // a tool takes the brush; Generate held opens its settings (a tap generates)
+        let held = |b: BarButton| if b == BarButton::Generate { Some(None) } else { tool(b).map(Some) };
+        if let Some((target, since)) = bar.down.and_then(|(b, since)| held(b).map(|t| (t, since)))
             && !self.tool_hold_acted
         {
             let left = TOOL_HOLD_S - (ctx.input(|i| i.time) - since);
             if left <= 0.0 {
                 self.tool_hold_acted = true;
-                self.tool_held(session, target);
+                match target {
+                    Some(tool) => self.tool_held(session, tool),
+                    None => self.toggle(session, Popover::Generate),
+                }
             } else {
                 ctx.request_repaint_after(std::time::Duration::from_secs_f64(left));
             }
@@ -2172,6 +2192,27 @@ impl Interface {
     }
 
     /// A panel's button: the panel opens (or closes), what works on the canvas ending first.
+    /// The Generate button tapped: the last prompt again through the last workflow, or, with none
+    /// chosen yet or a job under way, its panel (held, it always opens the panel).
+    fn generate_tapped(&mut self, session: &CanvasSession) {
+        if self.generate.busy() || self.generate.workflow().is_none() {
+            self.toggle(session, Popover::Generate);
+        } else {
+            self.feedback();
+            self.generate.start(session);
+        }
+    }
+
+    /// What the Generate panel asked for.
+    fn generate_act(&mut self, ctx: &egui::Context, session: &CanvasSession, act: crate::generate::Act) {
+        use crate::generate::Act;
+        match act {
+            Act::Connect => self.generate.connect(ctx),
+            Act::Generate => self.generate.start(session),
+            Act::Cancel => self.generate.cancel(),
+        }
+    }
+
     fn toggle(&mut self, session: &CanvasSession, popover: Popover) {
         self.feedback();
         self.switch_modes(session, ModeButton::Panel { colour: popover == Popover::Colour });
@@ -2345,6 +2386,17 @@ impl Interface {
                     self.open = None;
                 }
                 rect
+            }
+            Popover::Generate => {
+                let (shown, act) = self.generate.show(ctx, &mut self.look, button, backdrops);
+                if let Some(act) = act {
+                    self.generate_act(ctx, session, act);
+                }
+                // what was typed is kept as the panel goes, not at each letter
+                if !ctx.egui_wants_keyboard_input() {
+                    self.generate.keep();
+                }
+                shown
             }
             Popover::Adjustments => {
                 use crate::adjustments::MenuRow;
@@ -2523,7 +2575,7 @@ impl Interface {
             Popover::Brushes => self.library.modal(),
             Popover::Colour => self.colours.modal(),
             Popover::Actions => self.licences || self.actions_panel.modal(),
-            Popover::Adjustments => false,
+            Popover::Adjustments | Popover::Generate => false,
         }
     }
 

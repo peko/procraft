@@ -1,7 +1,8 @@
 # Generate (ComfyUI) — handoff
 
-State on 2026-11-13. The **Generate** feature works end to end on the desktop app and on the Android tablet,
-but **nothing is committed yet** (`git status` shows it all as modified or untracked on `main`).
+State on 2026-11-13. The **Generate** feature works end to end on the desktop app and on the Android tablet.
+It lives on the **`comfy`** branch of the user's fork, `git@github.com:peko/procraft.git` (remote `origin`;
+the original project is `upstream`, https://github.com/artcraft-android/procraft), rebased on the fork's `main`.
 
 ## What it is
 
@@ -109,8 +110,8 @@ clock, actions are capped at 20 s, and panels have no text input. The user agree
 
 1. **Check the Seed row on the tablet** (installed, unseen because the tablet was locked) and on desktop (built,
    not run).
-2. **Commit.** Nothing is committed. Use semantic commit messages (`feat(generate): …`), on a branch if
-   preferred.
+2. Further work goes on `comfy`, with semantic commit messages in the project's style
+   (`feat(scope): what it does, in words`).
 3. Ideas not yet asked for:
    - inpainting inside the selection;
    - Live mode;

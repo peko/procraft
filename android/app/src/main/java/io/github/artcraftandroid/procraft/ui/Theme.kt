@@ -205,8 +205,8 @@ object Pc {
 
     /** The top bar's spacing: its margins, the gaps between its tool and action buttons, and how wide those are. */
     data class BarFit(val margin: Dp, val toolGap: Dp, val actionGap: Dp, val button: Dp) {
-        /** The width it takes for the bar's two ends not to meet: Gallery and four actions, five tools. */
-        val needs: Dp get() = margin * 2 + GalleryWidth + (button + actionGap) * 4 + button * 5 + toolGap * 4
+        /** The width it takes for the bar's two ends not to meet: Gallery and five actions (Generate the fifth), five tools. */
+        val needs: Dp get() = margin * 2 + GalleryWidth + (button + actionGap) * 5 + button * 5 + toolGap * 4
     }
 
     /** Tighter and tighter, for windows too narrow for the measured steps. */

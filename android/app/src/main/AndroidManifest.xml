@@ -2,7 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Generate: the canvas sent to a ComfyUI server, often on the local network over plain HTTP -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
+        android:usesCleartextTraffic="true"
         android:allowBackup="false"
         android:enableOnBackInvokedCallback="true"
         android:largeHeap="true"

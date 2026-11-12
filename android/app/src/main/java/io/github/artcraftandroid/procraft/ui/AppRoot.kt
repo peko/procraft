@@ -152,6 +152,9 @@ fun AppRoot(vm: CanvasViewModel) {
                     val height = with(androidx.compose.ui.platform.LocalDensity.current) { Pc.BarHeight.toPx() }
                     val topGlass = BarGlass(barsShown, androidx.compose.ui.geometry.Offset(0f, -height * (1f - barsShown)))
                     TopBar(vm, Modifier.align(Alignment.TopCenter).then(rememberFrost(0.dp, topGlass)).then(up).then(fade))
+                    // how the Generate job goes, under its button, while its panel is closed
+                    val generateX = Pc.actionCentre(4, maxWidth)
+                    Box(Modifier.then(up).then(fade)) { GenerateBadge(vm, generateX) }
                     val sideBar = Pc.sideBarFit(maxHeight)
                     // a mode taking the screen slides it off its edge, and back when it ends
                     androidx.compose.animation.AnimatedVisibility(
@@ -203,9 +206,10 @@ fun AppRoot(vm: CanvasViewModel) {
                         }
                         Panel.ACTIONS -> 390.dp to 0
                         Panel.ADJUSTMENTS -> 330.dp to 1
+                        Panel.GENERATE -> 400.dp to 4
                         Panel.NONE -> 0.dp to 0
                     }
-                    val fromLeft = shown == Panel.ACTIONS || shown == Panel.ADJUSTMENTS
+                    val fromLeft = shown == Panel.ACTIONS || shown == Panel.ADJUSTMENTS || shown == Panel.GENERATE
                     val buttonX = if (fromLeft) Pc.actionCentre(button, maxWidth) else maxWidth - Pc.toolCentreFromRight(button, maxWidth)
                     // panels keep clear of the side bar, on whichever side it is
                     val clear = if (vm.showSideBar) Pc.SideBarWidth + Pc.PopoverGap else Pc.PopoverGap
@@ -233,6 +237,7 @@ fun AppRoot(vm: CanvasViewModel) {
                             // ending 25 above the screen's edge, their rows scrolling (as measured)
                             Panel.ACTIONS -> ActionsPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - 25.dp))
                             Panel.ADJUSTMENTS -> AdjustmentsPanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - 25.dp))
+                            Panel.GENERATE -> GeneratePanel(vm, place.arrowX, at.heightIn(max = maxHeight - Pc.BarHeight - 25.dp))
                             Panel.NONE -> Unit
                         }
                     }

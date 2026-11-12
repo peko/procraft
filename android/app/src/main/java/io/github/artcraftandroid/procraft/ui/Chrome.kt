@@ -82,6 +82,8 @@ fun TopBar(vm: CanvasViewModel, modifier: Modifier = Modifier) {
             ActionButton(PcIcons.Adjustments, "Adjustments", fit.button, selected = vm.panel == Panel.ADJUSTMENTS || vm.adjustment != null || vm.opacityLayer != null || vm.recoloring) { vm.adjustmentsPressed() }
             ActionButton(PcIcons.Selection, "Selection", fit.button, selected = vm.selecting, glyph = 33.dp) { vm.toggleSelecting() }
             ActionButton(PcIcons.Transform, "Transform", fit.button, selected = vm.transforming, glyph = 44.dp) { vm.toggleTransform() }
+            // Generate: tapped it makes the last prompt again, held it opens its panel
+            GenerateButton(vm, fit.button)
         }
         // the layers and colour panels take the highlight from the current tool while open
         val panelOpen = vm.panel == Panel.LAYERS || vm.panel == Panel.COLOR || vm.transforming || vm.selecting || vm.adjustment != null

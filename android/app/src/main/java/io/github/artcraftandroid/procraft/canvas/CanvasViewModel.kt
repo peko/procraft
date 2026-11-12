@@ -102,7 +102,7 @@ internal fun placeAfterSetMove(set: Int, from: Int, to: Int): Int = when (set) {
     else -> set
 }
 
-enum class Panel { NONE, LAYERS, COLOR, BRUSHES, ACTIONS, ADJUSTMENTS }
+enum class Panel { NONE, LAYERS, COLOR, BRUSHES, ACTIONS, ADJUSTMENTS, GENERATE }
 
 /** The eyedropper while it is open: the window point (pixels), what is shown around it, the colour it would pick. */
 class PickState(val x: Float, val y: Float, val image: ImageBitmap?, val rgb: Int?, val fromReference: Boolean = false)
@@ -447,6 +447,9 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The plugins, their values kept with the interface settings, and what their page draws. */
     val plugins = keptPlugins(app, interfacePrefs)
+
+    /** Generate: the canvas sent to a ComfyUI server, its picture taken back as a layer. */
+    val generate = Generate(this, app)
     var pluginList by mutableStateOf(plugins.plugins())
         private set
 
@@ -7459,6 +7462,26 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
     // ---- layers ----
 
     fun addLayer() = layerChange { if (it.addLayer() == 0uL) message = noRoom() }
+
+    /** The picture [job] made, as a new layer over the current one (one undo step); false if it couldn't go on one. */
+    fun putGenerated(job: io.github.artcraftandroid.procraft.core.ComfyJob): Boolean {
+        var put = false
+        layerChange { put = it.comfyPutResult(job) }
+        return put
+    }
+
+    /**
+     * The Generate button tapped: the last prompt again through the last workflow, or, with none
+     * chosen yet or a job under way, its panel (held, it always opens the panel).
+     */
+    fun generatePressed() {
+        if (generate.busy || generate.workflow.isEmpty() || session == null) {
+            toggle(Panel.GENERATE)
+        } else {
+            feedback()
+            generate.start()
+        }
+    }
 
     // no layer's pixels change, so the thumbnails stay (an artwork's hundreds would load again)
     fun selectLayer(id: ULong) = layerChange(thumbs = false) { it.selectLayer(id) }

@@ -1464,6 +1464,15 @@ impl CanvasSession {
     /// The flattened picture as it is exported, full size: its width, height, pixels (straight
     /// RGBA8; a CMYK canvas's as its press prints them) and the colour profile they are in.
     pub(crate) fn finished_picture(&self) -> Result<(u32, u32, Vec<u8>, Vec<u8>), MobileError> {
+        self.finished_picture_without(None)
+    }
+
+    /// The finished picture as [`Self::finished_picture`] reads it, with layer `hidden` (if shown)
+    /// left out of it for the reading only: not a change, nor an undo step.
+    pub(crate) fn finished_picture_without(
+        &self,
+        hidden: Option<LayerId>,
+    ) -> Result<(u32, u32, Vec<u8>, Vec<u8>), MobileError> {
         self.exported(0.0);
         let (w, h, rgba, icc) = {
             let mut guard = self.shared.lock_finished();
@@ -1476,8 +1485,16 @@ impl CanvasSession {
             let (Some(canvas), Some(gpu)) = (st.canvas.as_mut(), st.gpu.as_ref()) else {
                 return Err(file_error("reading the picture", "the canvas is not shown yet"));
             };
+            let left_out = hidden.filter(|&id| st.doc.layer(id).is_some_and(|l| l.visible));
+            if let Some(id) = left_out {
+                st.doc.set_visible(id, false);
+            }
             canvas.render_finished(gpu, &mut st.doc);
-            let rgba = canvas.read_composite(gpu).map_err(|e| file_error("reading the picture", e))?;
+            let read = canvas.read_composite(gpu);
+            if let Some(id) = left_out {
+                st.doc.set_visible(id, true);
+            }
+            let rgba = read.map_err(|e| file_error("reading the picture", e))?;
             (w, h, rgba, (icc, proof))
         };
         let (icc, proof) = icc;

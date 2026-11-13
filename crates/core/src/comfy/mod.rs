@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use procraft_engine::document::LayerId;
+use procraft_engine::document::{LayerId, LayerKind};
 use procraft_engine::geom::IRect;
 use serde_json::Value;
 
@@ -78,6 +78,18 @@ pub struct ComfyRequest {
     pub strength: f32,
     /// A seed, or none for a new one each time.
     pub seed: Option<u64>,
+    /// What is sent as the picture to start from.
+    pub source: ComfySource,
+}
+
+/// What a job sends as the picture to start from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, uniffi::Enum)]
+pub enum ComfySource {
+    /// The whole picture as it is seen (without the AI layer).
+    #[default]
+    Canvas,
+    /// The current layer alone, as painted (shown or not).
+    CurrentLayer,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -116,7 +128,7 @@ pub struct ComfyJob {
     status: Mutex<ComfyStatus>,
     made: Mutex<Option<Made>>,
     cancel: AtomicBool,
-    /// The prompt, for the layer's name.
+    /// The prompt, for the layer's name when the picture is kept.
     prompt: String,
     /// The seed it makes its picture with: the one asked for, or one picked as it started.
     seed: u64,
@@ -124,6 +136,11 @@ pub struct ComfyJob {
 
 #[uniffi::export]
 impl ComfyJob {
+    /// The prompt it was sent with.
+    pub fn prompt(&self) -> String {
+        self.prompt.clone()
+    }
+
     pub fn status(&self) -> ComfyStatus {
         self.status.lock().clone()
     }
@@ -236,7 +253,9 @@ fn run_graph(
     png: Vec<u8>,
 ) -> Result<(), String> {
     let shape = workflow::describe(&graph).map_err(|p| format!("{}: {p}", request.workflow))?;
-    let uploaded = if shape.takes_image { Some(server.upload(&png, "procraft_canvas.png")?) } else { None };
+    // at 100 % a workflow that can start from nothing doesn't need the canvas
+    let sends = shape.sends_canvas(request.strength);
+    let uploaded = if sends { Some(server.upload(&png, "procraft_canvas.png")?) } else { None };
     if job.cancelled() {
         job.set(ComfyPhase::Cancelled, -1.0, "Called off");
         return Ok(());
@@ -387,15 +406,19 @@ impl CanvasSession {
             seed: request.seed.map_or_else(new_seed, |s| s & ((1 << 53) - 1)),
         });
         // the canvas read here, on the interface's thread, as an export reads it
-        let picture = self.finished_picture().map(|(w, h, rgba, _)| (w, h, rgba));
+        let picture = match request.source {
+            ComfySource::Canvas => {
+                // the last picture, waiting to be kept or not, isn't part of the sketch
+                let preview = self.comfy_preview().map(LayerId);
+                self.finished_picture_without(preview).map(|(w, h, rgba, _)| (w, h, rgba)).map_err(|e| e.to_string())
+            }
+            ComfySource::CurrentLayer => self.current_layer_picture(),
+        };
         let info = self.info();
         let canvas = (info.width, info.height);
         let worker = Arc::clone(&job);
         let started = std::thread::Builder::new().name("comfy".into()).spawn(move || {
-            let png = match picture {
-                Ok((w, h, rgba)) => canvas_png(w, h, rgba),
-                Err(e) => Err(e.to_string()),
-            };
+            let png = picture.and_then(|(w, h, rgba)| canvas_png(w, h, rgba));
             let ran = png.and_then(|png| run(&worker, &request, canvas, png));
             if let Err(why) = ran {
                 log::warn!("generate: {why}");
@@ -408,29 +431,89 @@ impl CanvasSession {
         job
     }
 
-    /// The picture `job` made, as a new layer over the current one, named for its prompt, as one
-    /// step undo takes back. False if it has none (yet) or the artwork has no room for a layer.
+    /// The layer the last picture made waits on, to be kept ([`Self::comfy_accept`]) or
+    /// thrown away ([`Self::comfy_discard`]): the top paint layer called [`PREVIEW`], if any.
+    pub fn comfy_preview(&self) -> Option<u64> {
+        let st = self.shared.lock();
+        st.doc.layers().iter().rev().find(|l| l.kind == LayerKind::Paint && l.name == PREVIEW).map(|l| l.id.0)
+    }
+
+    /// The picture `job` made, on the waiting layer (made at the top of the layers the first
+    /// time, the current layer staying current), over what was there: one step undo takes
+    /// back. False if it has none (yet) or the artwork has no room for a layer.
     pub fn comfy_put_result(&self, job: Arc<ComfyJob>) -> bool {
         let Some(made) = job.made.lock().take() else { return false };
         let info = self.info();
         let (width, height) = (info.width, info.height);
         let Some(pixels) = fitted(made, width, height) else { return false };
         let _step = self.plugin_step();
-        let id = self.add_layer_quietly();
+        let id = match self.comfy_preview() {
+            Some(id) => id,
+            None => self
+                .change("new layer", |d| {
+                    if !d.has_room(1) {
+                        return None;
+                    }
+                    let current = d.current();
+                    let id = d.add_layer();
+                    // at the very top, out of any group
+                    d.move_layer(id, d.layers().len());
+                    d.rename(id, PREVIEW);
+                    d.set_current(current);
+                    Some(id.0)
+                })
+                .unwrap_or(0),
+        };
         if id == 0 {
             return false;
         }
-        {
-            let mut guard = self.shared.lock();
-            let st = &mut *guard;
-            st.rewrite_layer(LayerId(id), IRect::from_size(width, height), pixels);
-            self.shared.frame(st);
-        }
-        let words: String = job.prompt.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(40).collect();
-        self.rename_layer(id, if words.is_empty() { "Generated".to_owned() } else { format!("AI: {words}") });
+        let mut guard = self.shared.lock();
+        let st = &mut *guard;
+        st.rewrite_layer(LayerId(id), IRect::from_size(width, height), pixels);
+        self.shared.frame(st);
         true
     }
+
+    /// Keeps the picture on the AI layer: a copy of it just under it, named for `prompt`
+    /// ("AI: …"), the AI layer staying for the next picture and the current layer current. The
+    /// copy's id; none if there is no AI layer (or no room for another).
+    pub fn comfy_accept(&self, prompt: String) -> Option<u64> {
+        let id = self.comfy_preview()?;
+        let words: String = prompt.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(40).collect();
+        let name = if words.is_empty() { "AI picture".to_owned() } else { format!("AI: {words}") };
+        let current = self.shared.lock().doc.current();
+        self.duplicated(id, "keep AI picture", |d, copy| {
+            d.rename(copy, &name);
+            // under the AI layer (counted from the bottom without the copy, which is above it)
+            if let Some(at) = d.index_of(LayerId(id)) {
+                d.move_layer(copy, at);
+            }
+            d.set_current(current);
+        })
+    }
+
+    /// Throws the waiting picture away, its layer with it. False if none waits (or it's locked).
+    pub fn comfy_discard(&self) -> bool {
+        self.comfy_preview().is_some_and(|id| self.delete_layer(id))
+    }
 }
+
+impl CanvasSession {
+    /// The current layer's own pixels (straight alpha), as [`ComfySource::CurrentLayer`] sends them.
+    fn current_layer_picture(&self) -> Result<(u32, u32, Vec<u8>), String> {
+        let mut st = self.shared.lock();
+        let id = st.doc.current();
+        if st.doc.layer(id).is_some_and(|l| l.kind == LayerKind::Group) {
+            return Err("The current layer is a group: choose a layer to send".to_owned());
+        }
+        let (w, h) = (st.doc.width(), st.doc.height());
+        let rgba = st.layer_pixels(id).ok_or("The current layer couldn't be read")?;
+        Ok((w, h, crate::project::straight_alpha(&rgba)))
+    }
+}
+
+/// The name of the layer a picture made waits on until it is kept or thrown away.
+pub const PREVIEW: &str = "AI";
 
 #[cfg(test)]
 mod tests {
@@ -453,6 +536,42 @@ mod tests {
         p.next_node();
         assert!(p.value() >= sampled);
         assert!(p.value() < 1.0 && p.value() > 0.9);
+    }
+
+    fn made(prompt: &str) -> Arc<ComfyJob> {
+        Arc::new(ComfyJob {
+            status: Mutex::new(ComfyStatus { phase: ComfyPhase::Done, progress: 1.0, message: String::new() }),
+            made: Mutex::new(Some(Made { width: 2, height: 2, rgba: vec![255; 16] })),
+            cancel: AtomicBool::new(false),
+            prompt: prompt.to_owned(),
+            seed: 1,
+        })
+    }
+
+    #[test]
+    fn pictures_wait_on_one_top_layer_until_kept_or_thrown_away() {
+        let s = CanvasSession::new(8, 8);
+        let sketch = s.layers().first().map(|l| l.id).unwrap_or_default();
+        let count = |s: &CanvasSession| s.layers().len();
+        assert_eq!(s.comfy_preview(), None);
+        assert!(s.comfy_put_result(made("a cat")));
+        let preview = s.comfy_preview().unwrap();
+        assert_eq!(s.layers().first().map(|l| l.id), Some(preview), "at the top");
+        assert!(s.layers().iter().any(|l| l.id == sketch && l.current), "the sketch stays current");
+        // another picture goes on the same layer
+        assert!(s.comfy_put_result(made("a dog")));
+        assert_eq!((s.comfy_preview(), count(&s)), (Some(preview), 2));
+        // kept: a copy under it, named for its prompt; the AI layer stays on top, the sketch current
+        let kept = s.comfy_accept("a dog".into()).unwrap();
+        let order: Vec<(u64, String)> = s.layers().into_iter().map(|l| (l.id, l.name)).collect();
+        assert_eq!(order, vec![(preview, PREVIEW.to_owned()), (kept, "AI: a dog".to_owned()), (sketch, "Layer 1".to_owned())]);
+        assert!(s.layers().iter().any(|l| l.id == sketch && l.current));
+        // the next goes on the same AI layer; thrown away, only the AI layer goes
+        assert!(s.comfy_put_result(made("a bird")));
+        assert_eq!((s.comfy_preview(), count(&s)), (Some(preview), 3));
+        assert!(s.comfy_discard());
+        assert_eq!((s.comfy_preview(), count(&s)), (None, 2));
+        assert!(!s.comfy_discard() && s.comfy_accept(String::new()).is_none());
     }
 
     #[test]
@@ -512,8 +631,9 @@ mod tests {
             workflow: "local".into(),
             prompt: job.prompt.clone(),
             negative: String::new(),
-            strength: 0.9,
+            strength: std::env::var("COMFY_STRENGTH").ok().and_then(|s| s.parse().ok()).unwrap_or(0.9),
             seed: None,
+            source: ComfySource::Canvas,
         };
         println!("socket: {}", Server::new(&var("COMFY_URL")).unwrap().listen("procraft-probe").is_some());
         let server = Server::new(&request.server).unwrap();

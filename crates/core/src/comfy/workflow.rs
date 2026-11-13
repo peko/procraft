@@ -3,8 +3,18 @@
 //!
 //! A node is bound by its title (`_meta.title`), which may name several roles:
 //! `procraft:image`, `procraft:prompt`, `procraft:negative`, `procraft:strength`, `procraft:seed`,
-//! `procraft:size`. Without titles, the first `LoadImage` takes the canvas, the first text encoder
-//! the prompt, and every sampler's seed is set.
+//! `procraft:size`, `procraft:empty`, `procraft:encode`, `procraft:steps`. Without titles, the first
+//! `LoadImage` takes the canvas, the first text encoder the prompt, and every sampler's seed is set.
+//!
+//! Strength works as krita-ai-diffusion's: at 100 % a picture is made new (Generate), below it the
+//! canvas is refined (Refine). A workflow with both an empty latent (`procraft:empty`) and the
+//! canvas encoded (`procraft:encode`) starts from the one the strength asks for, what takes the
+//! other wired to it instead, and the other left out (at 100 % the canvas isn't even sent). The
+//! strength itself goes where `procraft:strength` is:
+//! - on a `SplitSigmas` (krita's way), or a `KSamplerAdvanced`: the last steps of the model's own
+//!   schedule are run, as many as the strength asks for and at least [`MIN_STEPS`]; the schedule's
+//!   steps are the `SplitSigmas`'s scheduler's (or the node titled `procraft:steps`);
+//! - else on its `denoise` (or `image_strength`, `strength`), as a plain `KSampler` takes it.
 //!
 //! A text node whose words hold `{prompt}` keeps them, the prompt in its place (a model's quality
 //! tags around it, say); else the prompt takes its words. An empty negative leaves the workflow's own.
@@ -29,6 +39,31 @@ pub(crate) struct Inputs<'a> {
 pub(crate) struct Shape {
     /// It starts from the canvas (image to image), else from the prompt alone.
     pub takes_image: bool,
+    /// It can start from an empty latent instead, at 100 % (`procraft:empty` and `procraft:encode`).
+    pub starts_empty: bool,
+}
+
+impl Shape {
+    /// Whether a job at `strength` sends the canvas.
+    pub(crate) fn sends_canvas(&self, strength: f32) -> bool {
+        self.takes_image && !(self.starts_empty && strength >= 1.0)
+    }
+}
+
+/// The fewest steps a refine runs, as krita-ai-diffusion's sampler presets have it.
+pub(crate) const MIN_STEPS: u32 = 4;
+
+/// A refine at `strength` (below 1) over a schedule of `steps`: the steps the schedule is made of,
+/// and the one it starts at, as krita-ai-diffusion's `apply_strength` (the schedule lengthened when
+/// fewer than [`MIN_STEPS`] would be left).
+pub(crate) fn split_steps(strength: f32, steps: u32) -> (u32, u32) {
+    let strength = strength.clamp(0.01, 1.0);
+    let start = (steps as f32 * (1.0 - strength)).round() as u32;
+    if steps.saturating_sub(start) < MIN_STEPS {
+        let steps = (MIN_STEPS as f32 / strength).floor() as u32;
+        return (steps, steps.saturating_sub(MIN_STEPS));
+    }
+    (steps, start)
 }
 
 /// The roles a node's title gives it.
@@ -93,7 +128,79 @@ pub(crate) fn describe(workflow: &Value) -> Result<Shape, String> {
     if prompt.is_none() {
         return Err("no node for the prompt: title one procraft:prompt".to_owned());
     }
-    Ok(Shape { takes_image: image.is_some() })
+    let starts_empty = find(nodes, "empty", |_| false).is_some() && find(nodes, "encode", |_| false).is_some();
+    Ok(Shape { takes_image: image.is_some(), starts_empty })
+}
+
+/// Whether `value` is a link to node `id` (`[id, output]`).
+fn links_to(value: &Value, id: &str) -> bool {
+    value.as_array().and_then(|l| l.first()).and_then(Value::as_str) == Some(id)
+}
+
+/// Every link to node `from` made a link to `to` (same output).
+fn rewire(nodes: &mut Map<String, Value>, from: &str, to: &str) {
+    for node in nodes.values_mut() {
+        let Some(inputs) = node.get_mut("inputs").and_then(Value::as_object_mut) else { continue };
+        for value in inputs.values_mut() {
+            if links_to(value, from)
+                && let Some(link) = value.as_array_mut()
+                && let Some(first) = link.first_mut()
+            {
+                *first = Value::from(to);
+            }
+        }
+    }
+}
+
+/// Takes node `id` out if nothing links to it any more, and so on up what it took in.
+fn prune(nodes: &mut Map<String, Value>, id: &str) {
+    let used = nodes.values().any(|n| n.get("inputs").and_then(Value::as_object).is_some_and(|i| i.values().any(|v| links_to(v, id))));
+    if used {
+        return;
+    }
+    let Some(node) = nodes.remove(id) else { return };
+    let sources: Vec<String> = node
+        .get("inputs")
+        .and_then(Value::as_object)
+        .map(|i| i.values().filter_map(|v| v.as_array()?.first()?.as_str().map(str::to_owned)).collect())
+        .unwrap_or_default();
+    for source in sources {
+        prune(nodes, &source);
+    }
+}
+
+/// The steps of the schedule a `SplitSigmas` (`id`) splits: the node titled `procraft:steps`, else
+/// the one its sigmas come from.
+fn schedule_of(nodes: &Map<String, Value>, id: &str) -> Option<String> {
+    find(nodes, "steps", |_| false).or_else(|| {
+        let from = nodes.get(id)?.get("inputs")?.get("sigmas")?.as_array()?.first()?.as_str()?;
+        has(nodes, from, "steps").then(|| from.to_owned())
+    })
+}
+
+/// Sets `strength` on node `id` the way it takes it (see the module's notes).
+fn set_strength(nodes: &mut Map<String, Value>, id: &str, strength: f32) {
+    let steps_of = |nodes: &Map<String, Value>, at: &str| {
+        nodes.get(at).and_then(|n| n.get("inputs")).and_then(|i| i.get("steps")).and_then(Value::as_u64).map(|s| s as u32)
+    };
+    // (where the schedule is, the input the start goes in)
+    let split = if has(nodes, id, "step") {
+        schedule_of(nodes, id).map(|at| (at, "step"))
+    } else if has(nodes, id, "start_at_step") {
+        Some((id.to_owned(), "start_at_step"))
+    } else {
+        None
+    };
+    if let Some((at, start_field)) = split {
+        let Some(steps) = steps_of(nodes, &at) else { return };
+        let (steps, start) = if strength >= 1.0 { (steps, 0) } else { split_steps(strength, steps) };
+        set(nodes, &at, "steps", Value::from(steps));
+        set(nodes, id, start_field, Value::from(start));
+        return;
+    }
+    if let Some(field) = ["denoise", "image_strength", "strength"].into_iter().find(|f| has(nodes, id, f)) {
+        set(nodes, id, field, Value::from(f64::from(strength)));
+    }
 }
 
 /// A size near a megapixel with the canvas's proportions, each side a multiple of 16.
@@ -136,8 +243,16 @@ pub(crate) fn apply(workflow: &mut Value, inputs: &Inputs<'_>) -> Result<Shape, 
             set(nodes, id, field, Value::from(text));
         }
     }
+    let strength = inputs.strength.clamp(0.0, 1.0);
+    // from an empty latent at 100 %, else from the canvas: what takes the other is wired to it
+    if shape.starts_empty
+        && let (Some(empty), Some(encode)) = (find(nodes, "empty", |_| false), find(nodes, "encode", |_| false))
+    {
+        let (unused, used) = if strength >= 1.0 { (encode, empty) } else { (empty, encode) };
+        rewire(nodes, &unused, &used);
+        prune(nodes, &unused);
+    }
     // the strength where the titled node has it, else every sampler's denoise (image to image only)
-    let strength = Value::from(f64::from(inputs.strength.clamp(0.0, 1.0)));
     let titled = find(nodes, "strength", |_| false);
     let strength_nodes = match titled {
         Some(id) => vec![id],
@@ -145,9 +260,7 @@ pub(crate) fn apply(workflow: &mut Value, inputs: &Inputs<'_>) -> Result<Shape, 
         None => Vec::new(),
     };
     for id in strength_nodes {
-        if let Some(field) = ["denoise", "image_strength", "strength"].into_iter().find(|f| has(nodes, &id, f)) {
-            set(nodes, &id, field, strength.clone());
-        }
+        set_strength(nodes, &id, strength);
     }
     // the seed where titled, else every seed (a fixed one would give the same picture again)
     let seeded: Vec<String> = match find(nodes, "seed", |_| false) {
@@ -192,7 +305,7 @@ mod tests {
     fn a_titled_workflow_takes_the_canvas_prompt_strength_and_seed() {
         let mut w = sketch();
         let shape = apply(&mut w, &inputs(Some("canvas.png")));
-        assert_eq!(shape, Ok(Shape { takes_image: true }));
+        assert_eq!(shape, Ok(Shape { takes_image: true, starts_empty: false }));
         assert_eq!(w["5"]["inputs"]["image"], "canvas.png");
         assert_eq!(w["8"]["inputs"]["text"], "a cabin");
         assert_eq!(w["9"]["inputs"]["text"], "blur");
@@ -220,7 +333,7 @@ mod tests {
             "4": {"class_type": "LoadImage", "inputs": {"image": "a.png"}},
             "12": {"class_type": "KSampler", "inputs": {"seed": 1, "denoise": 1.0}}
         });
-        assert_eq!(apply(&mut w, &inputs(Some("c.png"))), Ok(Shape { takes_image: true }));
+        assert_eq!(apply(&mut w, &inputs(Some("c.png"))), Ok(Shape { takes_image: true, starts_empty: false }));
         assert_eq!(w["3"]["inputs"]["text"], "a cabin");
         assert_eq!(w["4"]["inputs"]["image"], "c.png");
         assert_eq!(w["12"]["inputs"]["seed"], 42);
@@ -233,7 +346,7 @@ mod tests {
             "8": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}, "_meta": {"title": "procraft:prompt"}},
             "10": {"class_type": "KSampler", "inputs": {"seed": 0, "denoise": 1.0}}
         });
-        assert_eq!(apply(&mut w, &inputs(None)), Ok(Shape { takes_image: false }));
+        assert_eq!(apply(&mut w, &inputs(None)), Ok(Shape { takes_image: false, starts_empty: false }));
         assert_eq!(w["10"]["inputs"]["denoise"], 1.0);
         assert_eq!((w["7"]["inputs"]["width"].clone(), w["7"]["inputs"]["height"].clone()), (json!(1184), json!(880)));
     }
@@ -242,6 +355,68 @@ mod tests {
     fn the_editors_format_and_a_workflow_without_a_prompt_are_refused() {
         assert!(describe(&json!({"nodes": [], "links": []})).is_err_and(|e| e.contains("Export (API)")));
         assert!(describe(&json!({"1": {"class_type": "LoadImage", "inputs": {}}})).is_err_and(|e| e.contains("prompt")));
+    }
+
+    /// A graph as krita-ai-diffusion builds it, titled for ProCraft.
+    fn krita() -> Value {
+        json!({
+            "1": {"class_type": "UNETLoader", "inputs": {"unet_name": "m"}},
+            "4": {"class_type": "CLIPTextEncode", "inputs": {"text": "{prompt}"}, "_meta": {"title": "procraft:prompt"}},
+            "6": {"class_type": "LoadImage", "inputs": {"image": "x.png"}, "_meta": {"title": "procraft:image"}},
+            "7": {"class_type": "ImageScaleToTotalPixels", "inputs": {"image": ["6", 0]}},
+            "8": {"class_type": "VAEEncode", "inputs": {"pixels": ["7", 0]}, "_meta": {"title": "procraft:encode"}},
+            "9": {"class_type": "EmptyLatentImage", "inputs": {"width": 1, "height": 1}, "_meta": {"title": "procraft:size procraft:empty"}},
+            "11": {"class_type": "BasicScheduler", "inputs": {"model": ["1", 0], "steps": 8}},
+            "12": {"class_type": "SplitSigmas", "inputs": {"sigmas": ["11", 0], "step": 1}, "_meta": {"title": "procraft:strength"}},
+            "13": {"class_type": "RandomNoise", "inputs": {"noise_seed": 0}, "_meta": {"title": "procraft:seed"}},
+            "15": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["13", 0], "sigmas": ["12", 1], "latent_image": ["8", 0]}}
+        })
+    }
+
+    #[test]
+    fn strength_runs_the_last_steps_of_the_schedule_as_krita_does() {
+        assert_eq!(split_steps(0.6, 8), (8, 3));
+        assert_eq!(split_steps(0.9, 8), (8, 1));
+        // fewer than four left: the schedule lengthened
+        assert_eq!(split_steps(0.3, 8), (13, 9));
+        assert_eq!(split_steps(0.05, 8), (80, 76));
+    }
+
+    #[test]
+    fn below_100_the_canvas_is_refined_over_the_schedules_last_steps() {
+        let mut w = krita();
+        let shape = apply(&mut w, &Inputs { strength: 0.6, ..inputs(Some("c.png")) }).unwrap();
+        assert!(shape.sends_canvas(0.6) && !shape.sends_canvas(1.0));
+        assert_eq!(w["15"]["inputs"]["latent_image"], json!(["8", 0]));
+        assert!(w.get("9").is_none(), "the empty latent left out");
+        assert_eq!((w["11"]["inputs"]["steps"].clone(), w["12"]["inputs"]["step"].clone()), (json!(8), json!(3)));
+        assert_eq!(w["6"]["inputs"]["image"], "c.png");
+        assert_eq!(w["13"]["inputs"]["noise_seed"], 42);
+    }
+
+    #[test]
+    fn at_100_a_picture_is_made_new_without_the_canvas() {
+        let mut w = krita();
+        apply(&mut w, &Inputs { strength: 1.0, ..inputs(None) }).unwrap();
+        assert_eq!(w["15"]["inputs"]["latent_image"], json!(["9", 0]));
+        for gone in ["6", "7", "8"] {
+            assert!(w.get(gone).is_none(), "{gone} left out");
+        }
+        assert_eq!((w["11"]["inputs"]["steps"].clone(), w["12"]["inputs"]["step"].clone()), (json!(8), json!(0)));
+        assert_eq!((w["9"]["inputs"]["width"].clone(), w["9"]["inputs"]["height"].clone()), (json!(1184), json!(880)));
+        assert!(w.get("1").is_some(), "the rest kept");
+    }
+
+    #[test]
+    fn a_ksampler_advanced_takes_the_start_step() {
+        let mut w = json!({
+            "4": {"class_type": "CLIPTextEncode", "inputs": {"text": ""}, "_meta": {"title": "procraft:prompt"}},
+            "6": {"class_type": "LoadImage", "inputs": {"image": "x.png"}},
+            "10": {"class_type": "KSamplerAdvanced", "inputs": {"steps": 8, "start_at_step": 0, "noise_seed": 0},
+                   "_meta": {"title": "procraft:strength procraft:seed"}}
+        });
+        apply(&mut w, &Inputs { strength: 0.75, ..inputs(Some("c.png")) }).unwrap();
+        assert_eq!((w["10"]["inputs"]["steps"].clone(), w["10"]["inputs"]["start_at_step"].clone()), (json!(8), json!(2)));
     }
 
     #[test]

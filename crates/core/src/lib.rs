@@ -151,7 +151,7 @@ pub use plugin_canvas::{PluginCanvas, PluginKind};
 pub use plugin_file::read_plugin_file;
 pub use plugin_filter::PluginFilterShown;
 pub use plugin_panel::{PanelRow, PluginPanel};
-pub use comfy::{ComfyError, ComfyJob, ComfyPhase, ComfyRequest, ComfyStatus, ComfyWorkflow, comfy_workflows};
+pub use comfy::{ComfyError, ComfyJob, ComfyPhase, ComfyRequest, ComfySource, ComfyStatus, ComfyWorkflow, comfy_workflows};
 pub use plugins::{
     PluginAction, PluginControl, PluginInfo, PluginOffer, PluginPart, PluginPlace, PluginSlider, PluginSource,
     PluginSwitch, Plugins, plugin_file_most_bytes, plugin_slider_along, plugin_slider_at, plugin_slider_shown,

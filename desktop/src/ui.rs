@@ -675,10 +675,19 @@ impl Interface {
         let bar = crate::chrome::top_bar(ui, &mut self.look, info.tool, colour, self.colours.hsv[2], &lit);
         let held = self.tool_hold(&ctx, session, &bar);
         // the Generate job's progress under its button, while its panel (which shows it) is closed
+        // and with a picture waiting on the AI layer, keep it or throw it away
         if self.open != Some(Popover::Generate)
             && let Some(button) = bar.rect(BarButton::Generate)
         {
-            crate::generate::badge(&ctx, button, self.generate.bar_status());
+            let status = self.generate.bar_status();
+            let working = matches!(status, crate::generate::BarStatus::Working(_));
+            if self.generate.pending() && !working {
+                if let Some(act) = crate::generate::choices(&ctx, button) {
+                    self.generate_act(&ctx, session, act);
+                }
+            } else {
+                crate::generate::badge(&ctx, button, status);
+            }
         }
         match bar.pressed.filter(|_| !held) {
             Some(BarButton::Gallery) => self.actions.push(Action::Gallery),
@@ -2210,6 +2219,8 @@ impl Interface {
             Act::Connect => self.generate.connect(ctx),
             Act::Generate => self.generate.start(session),
             Act::Cancel => self.generate.cancel(),
+            Act::Keep => self.generate.accept(session),
+            Act::Discard => self.generate.discard(session),
         }
     }
 

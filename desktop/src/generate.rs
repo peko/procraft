@@ -8,7 +8,7 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use egui::{Align2, Id, Order, Rect, ScrollArea, Sense, Ui, UiBuilder, pos2, vec2};
-use procraft_core::{CanvasSession, ComfyJob, ComfyPhase, ComfyRequest, ComfyWorkflow};
+use procraft_core::{CanvasSession, ComfyJob, ComfyPhase, ComfyRequest, ComfySource, ComfyWorkflow};
 
 use crate::icons::{Icon, Part};
 use crate::look::{Look, Themed, Weight, argb, pc, text};
@@ -80,6 +80,10 @@ pub enum Act {
     Generate,
     /// Call the job under way off.
     Cancel,
+    /// Keep the picture waiting on the AI layer.
+    Keep,
+    /// Throw the picture waiting on the AI layer away.
+    Discard,
 }
 
 /// The panel's two pages: what to make, and where and with what.
@@ -114,6 +118,8 @@ struct Kept {
     /// The seed last used or typed, and whether each job takes a new one instead.
     seed: u64,
     random_seed: bool,
+    /// What is sent: the current layer alone (true) or the whole canvas.
+    current_layer: bool,
 }
 
 impl Default for Kept {
@@ -126,6 +132,7 @@ impl Default for Kept {
             negatives: std::collections::BTreeMap::new(),
             seed: 0,
             random_seed: true,
+            current_layer: false,
         }
     }
 }
@@ -149,6 +156,8 @@ pub struct Generate {
     /// The seed as typed (the last used while it is random), and whether each job takes a new one.
     seed: String,
     random_seed: bool,
+    /// What is sent: the current layer alone (true) or the whole canvas.
+    current_layer: bool,
     tab: Tab,
     connection: Connection,
     /// How the last job went, or the one under way goes.
@@ -158,8 +167,12 @@ pub struct Generate {
     job: Option<Arc<ComfyJob>>,
     /// The job's share done, 0 to 1, once the server tells it.
     progress: Option<f32>,
-    /// How the last job ended (true: it made a layer), and when.
+    /// How the last job ended (true: it made a picture), and when.
     outcome: Option<(bool, Instant)>,
+    /// A new picture waits on the AI layer, to be kept or thrown away (none once the layer is gone).
+    pending: bool,
+    /// The prompt the picture waiting was made from, to name its layer when kept.
+    landed_prompt: String,
     /// What was last written to `generate.json`.
     saved: Kept,
 }
@@ -179,6 +192,7 @@ impl Default for Generate {
             negatives: kept.negatives.clone(),
             seed: kept.seed.to_string(),
             random_seed: kept.random_seed,
+            current_layer: kept.current_layer,
             tab: Tab::Generate,
             connection: Connection::Unknown,
             status: String::new(),
@@ -186,6 +200,8 @@ impl Default for Generate {
             job: None,
             progress: None,
             outcome: None,
+            pending: false,
+            landed_prompt: String::new(),
             saved: kept,
         }
     }
@@ -202,9 +218,37 @@ impl Generate {
         self.workflows.iter().find(|w| w.name == self.workflow)
     }
 
+    /// The job a tap makes refines the canvas (below 100 %), else makes a picture new, as
+    /// krita-ai-diffusion's Refine and Generate.
+    fn refines(&self) -> bool {
+        self.strength < 1.0 && self.chosen().is_none_or(|w| w.takes_image)
+    }
+
     /// A job is under way.
     pub fn busy(&self) -> bool {
         self.job.is_some()
+    }
+
+    /// A picture waits on the AI layer to be kept or thrown away.
+    pub fn pending(&self) -> bool {
+        self.pending
+    }
+
+    /// Keeps the picture waiting: its layer stays, named for its prompt.
+    pub fn accept(&mut self, session: &CanvasSession) {
+        let prompt = if self.landed_prompt.is_empty() { self.prompt.trim() } else { self.landed_prompt.as_str() };
+        if session.comfy_accept(prompt.to_owned()).is_some() {
+            self.status = "Kept: copied to a layer of its own".to_owned();
+            self.pending = false;
+        }
+    }
+
+    /// Throws the picture waiting away, with its layer.
+    pub fn discard(&mut self, session: &CanvasSession) {
+        if session.comfy_discard() {
+            self.status = "Thrown away".to_owned();
+        }
+        self.pending = false;
     }
 
     /// Lists the server's workflows, on a thread of its own.
@@ -239,6 +283,7 @@ impl Generate {
             prompt: self.prompt.trim().to_owned(),
             strength: self.strength,
             seed: if self.random_seed { None } else { Some(self.typed_seed()) },
+            source: if self.current_layer { ComfySource::CurrentLayer } else { ComfySource::Canvas },
         };
         let job = session.comfy_generate(request);
         // the seed it uses shows at once, to keep if the picture is liked
@@ -246,7 +291,7 @@ impl Generate {
         self.job = Some(job);
         self.progress = None;
         self.outcome = None;
-        self.status = "Sending the canvas…".to_owned();
+        self.status = "Sending…".to_owned();
         self.keep();
     }
 
@@ -272,8 +317,10 @@ impl Generate {
     }
 
     /// Takes in what the listing and the job have come to; each frame. A finished job's picture
-    /// goes on a new layer.
+    /// goes on the AI layer, over the last one, to be kept or thrown away.
     pub fn tick(&mut self, ctx: &egui::Context, session: &CanvasSession) {
+        // undo or a layer deleted by hand may have taken the AI layer away
+        self.pending &= session.comfy_preview().is_some();
         if let Some(listed) = self.listing.as_ref().and_then(|r| r.try_recv().ok()) {
             self.listing = None;
             match listed {
@@ -295,10 +342,13 @@ impl Generate {
         let status = job.status();
         match status.phase {
             ComfyPhase::Done => {
+                let prompt = job.prompt();
                 if session.comfy_put_result(job) {
-                    self.ended(true, format!("{}: a new layer", status.message));
+                    self.pending = true;
+                    self.landed_prompt = prompt;
+                    self.ended(true, format!("{}: on the AI layer. Keep it or throw it away", status.message));
                 } else {
-                    self.ended(false, "The picture couldn't go on a new layer".to_owned());
+                    self.ended(false, "The picture couldn't go on a layer".to_owned());
                 }
             }
             ComfyPhase::Failed => {
@@ -331,6 +381,7 @@ impl Generate {
             negatives: self.negatives.iter().filter(|(_, n)| !n.trim().is_empty()).map(|(k, v)| (k.clone(), v.clone())).collect(),
             seed: self.typed_seed(),
             random_seed: self.random_seed,
+            current_layer: self.current_layer,
         };
         if kept == self.saved {
             return;
@@ -478,11 +529,31 @@ impl Generate {
             let bar = egui::ProgressBar::new(self.progress.unwrap_or(0.0)).desired_width(width).desired_height(6.0);
             ui.add(if self.progress.is_none() { bar.animate(true) } else { bar });
         } else {
-            let button = egui::Button::new("Generate").min_size(vec2(width, 36.0));
+            let words = match (self.refines(), self.pending) {
+                (true, false) => "Refine",
+                (true, true) => "Refine again",
+                (false, false) => "Generate",
+                (false, true) => "Generate again",
+            };
+            let button = egui::Button::new(words).min_size(vec2(width, 36.0));
             if ui.add_enabled(self.workflow().is_some(), button).clicked() {
                 act = Some(Act::Generate);
             }
             ui.add_space(4.0);
+            if self.pending {
+                ui.horizontal(|ui| {
+                    let half = (width - 8.0) / 2.0;
+                    let discard = egui::Button::new(egui::RichText::new("✕  Discard").color(argb(FAILED)));
+                    if ui.add_sized([half, 32.0], discard).clicked() {
+                        act = Some(Act::Discard);
+                    }
+                    let keep = egui::Button::new(egui::RichText::new("✓  Keep").color(argb(DONE)));
+                    if ui.add_sized([half, 32.0], keep).clicked() {
+                        act = Some(Act::Keep);
+                    }
+                });
+                ui.add_space(4.0);
+            }
         }
         if !self.status.is_empty() {
             ui.label(&self.status);
@@ -531,7 +602,7 @@ impl Generate {
                     let name = w.name.trim_end_matches(".json");
                     match &w.problem {
                         None => {
-                            let kind = if w.takes_image { "sketch → image" } else { "text → image" };
+                            let kind = if w.takes_image { "generate · refine" } else { "generate" };
                             if ui.selectable_label(self.workflow == w.name, format!("{name}   ·  {kind}")).clicked() {
                                 self.workflow = w.name.clone();
                             }
@@ -542,6 +613,17 @@ impl Generate {
                     }
                 }
             });
+        });
+        ui.add_space(10.0);
+
+        label(ui, "Send");
+        ui.horizontal(|ui| {
+            let half = (width - 8.0) / 2.0;
+            for (current, words) in [(false, "Canvas"), (true, "Current layer")] {
+                if ui.add_sized([half, 28.0], egui::Button::selectable(self.current_layer == current, words)).clicked() {
+                    self.current_layer = current;
+                }
+            }
         });
         ui.add_space(10.0);
 
@@ -672,4 +754,43 @@ pub fn badge(ctx: &egui::Context, button: Rect, status: BarStatus) {
             text(painter, rect.center(), Align2::CENTER_CENTER, &words, 13.0, Weight::SemiBold, argb(BADGE_TEXT));
         },
     );
+}
+
+/// While a picture waits on the AI layer and the panel is closed, two round buttons under the bar
+/// button at `button`, one over the other: throw it away (✕), then keep it (✓). What was tapped.
+pub fn choices(ctx: &egui::Context, button: Rect) -> Option<Act> {
+    let size = 32.0;
+    let gap = 8.0;
+    let x = button.center().x;
+    let top = button.bottom() + 8.0;
+    let spots = [(Act::Discard, pos2(x, top + size / 2.0)), (Act::Keep, pos2(x, top + size * 1.5 + gap))];
+    let area = Rect::from_min_size(pos2(x - size / 2.0, top), vec2(size, size * 2.0 + gap));
+    let mut tapped = None;
+    egui::Area::new(Id::unique("generate choices")).fixed_pos(area.min).order(Order::Foreground).show(ctx, |ui| {
+        // the area covers both, so a press on them doesn't reach the canvas
+        ui.allocate_rect(area, Sense::hover());
+        for (act, centre) in spots {
+            let cell = Rect::from_center_size(centre, vec2(size, size));
+            let response = ui.interact(cell, Id::unique(("generate choice", act == Act::Keep)), Sense::click());
+            let colour = argb(if act == Act::Keep { DONE } else { FAILED });
+            let painter = ui.painter();
+            let fill = if response.hovered() { colour } else { argb(BADGE_FILL) };
+            painter.circle_filled(centre, size / 2.0, fill);
+            painter.circle_stroke(centre, size / 2.0 - 0.75, egui::Stroke::new(1.5, colour));
+            let ink = egui::Stroke::new(2.5, if response.hovered() { egui::Color32::WHITE } else { colour });
+            if act == Act::Keep {
+                let points = vec![centre + vec2(-6.5, 0.5), centre + vec2(-2.0, 5.0), centre + vec2(7.0, -5.0)];
+                painter.add(egui::Shape::line(points, ink));
+            } else {
+                let d = 5.5;
+                painter.line_segment([centre + vec2(-d, -d), centre + vec2(d, d)], ink);
+                painter.line_segment([centre + vec2(-d, d), centre + vec2(d, -d)], ink);
+            }
+            let words = if act == Act::Keep { "Keep the picture" } else { "Throw the picture away" };
+            if response.on_hover_text(words).clicked() {
+                tapped = Some(act);
+            }
+        }
+    });
+    tapped
 }

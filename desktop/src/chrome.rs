@@ -113,10 +113,8 @@ pub fn top_bar(ui: &mut Ui, look: &mut Look, tool: ToolKind, colour: Color32, br
             (BarButton::Adjustments, &icons::ADJUSTMENTS, 36.0, lit.adjustments),
             (BarButton::Selection, &icons::SELECTION, 33.0, lit.selection),
             (BarButton::Transform, &icons::TRANSFORM, 44.0, lit.transform),
-            (BarButton::Generate, &crate::generate::SPARKLE, 36.0, lit.generate),
         ];
-        for (which, icon, glyph, on) in actions {
-            let rect = button(x, pc::BAR_BUTTON_WIDTH);
+        let mut action = |ui: &Ui, which: BarButton, icon: &crate::icons::Icon, glyph: f32, on: bool, rect: Rect| {
             tap(ui, which, rect);
             let l = highlight(&ctx, ui.scope_id().with(("lit", which)), on);
             let disc = mix(argb(pc::ACTION_DISC), argb(pc::BAR_GLYPH_SELECTED), l);
@@ -127,11 +125,17 @@ pub fn top_bar(ui: &mut Ui, look: &mut Look, tool: ToolKind, colour: Color32, br
             if which == BarButton::Generate {
                 crate::generate::draw_status(ui, rect.center(), pc::ACTION_DISC_SIZE, lit.generate_status);
             }
+        };
+        for (which, icon, glyph, on) in actions {
+            action(ui, which, icon, glyph, on, button(x, pc::BAR_BUTTON_WIDTH));
             x += pc::BAR_BUTTON_WIDTH + action_gap;
         }
 
-        // from the colour leftwards
+        // Generate at the very right (its keep / throw-away buttons hang under it, where a window's
+        // close is), then from the colour leftwards
         let mut x = r.right() - pc::BAR_MARGIN - pc::BAR_BUTTON_WIDTH;
+        action(ui, BarButton::Generate, &crate::generate::SPARKLE, 36.0, lit.generate, button(x, pc::BAR_BUTTON_WIDTH));
+        x -= pc::BAR_BUTTON_WIDTH + tool_gap;
         let rect = button(x, pc::BAR_BUTTON_WIDTH);
         let colour_rect = rect;
         ui.painter().circle_filled(rect.center(), pc::COLOR_DOT / 2.0, colour);

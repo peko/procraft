@@ -186,6 +186,11 @@ fun GenerateButton(vm: CanvasViewModel, width: Dp) {
 fun GenerateBadge(vm: CanvasViewModel, buttonCentreX: Dp) {
     if (vm.panel == Panel.GENERATE) return
     val status = rememberBarStatus(vm.generate)
+    // a picture waiting on the AI layer: throw it away or keep it, until another is under way
+    if (vm.generate.pending && status !is BarStatus.Working) {
+        Choices(vm.generate, buttonCentreX)
+        return
+    }
     val (words, edge) = when (status) {
         BarStatus.Idle -> return
         is BarStatus.Working -> (status.progress?.let { "${(it * 100).roundToInt()}%" } ?: "Queued") to null
@@ -261,7 +266,14 @@ private fun MainPage(vm: CanvasViewModel, g: Generate, toSettings: () -> Unit) {
         WideButton(words, enabled = true) { g.cancel() }
         ProgressLine(g.progress)
     } else {
-        WideButton("Generate", enabled = g.workflow.isNotEmpty() && vm.session != null) { g.start() }
+        val verb = if (g.refines) "Refine" else "Generate"
+        WideButton(if (g.pending) "$verb again" else verb, enabled = g.workflow.isNotEmpty() && vm.session != null) { g.start() }
+        if (g.pending) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ChoiceButton("✕  Discard", FailedRed, Modifier.weight(1f)) { g.discard() }
+                ChoiceButton("✓  Keep", DoneGreen, Modifier.weight(1f)) { g.accept() }
+            }
+        }
     }
     if (g.status.isNotEmpty()) Text(g.status, color = Label, fontSize = 14.sp)
 }
@@ -312,8 +324,22 @@ private fun SettingsPage(g: Generate) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(name, color = if (chosen) Color.White else Pc.Text, fontSize = 15.sp, maxLines = 1, modifier = Modifier.weight(1f))
-                    Text(if (w.takesImage) "sketch → image" else "text → image", color = if (chosen) Color.White else Label, fontSize = 13.sp)
+                    Text(if (w.takesImage) "generate · refine" else "generate", color = if (chosen) Color.White else Label, fontSize = 13.sp)
                 }
+            }
+        }
+    }
+    Spacer(Modifier.height(6.dp))
+    FieldLabel("Send")
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        for ((current, words) in listOf(false to "Canvas", true to "Current layer")) {
+            val chosen = g.currentLayer == current
+            Box(
+                Modifier.weight(1f).height(42.dp).clip(RoundedCornerShape(10.dp)).background(if (chosen) Pc.Accent else Pc.ActionsGroup)
+                    .clickable { g.currentLayer = current; g.keep() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(words, color = if (chosen) Color.White else Pc.Accent, fontSize = 16.sp, fontWeight = FontWeight.Medium)
             }
         }
     }
@@ -442,6 +468,52 @@ private fun WideButton(words: String, enabled: Boolean, onTap: () -> Unit) {
     ) {
         Text(words, color = if (enabled) Color.White else Label, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
     }
+}
+
+@Composable
+private fun ChoiceButton(words: String, colour: Color, modifier: Modifier, onTap: () -> Unit) {
+    Box(
+        modifier.height(42.dp).clip(RoundedCornerShape(10.dp)).background(Pc.ActionsGroup).clickable(onClick = onTap),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(words, color = colour, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/** Under the bar's button, one over the other, the picture waiting on the AI layer thrown away (✕), then kept (✓). */
+@Composable
+private fun Choices(g: Generate, buttonCentreX: Dp) {
+    val size = 38.dp
+    val gap = 10.dp
+    Column(Modifier.offset(x = buttonCentreX - size / 2, y = Pc.BarHeight + 8.dp), verticalArrangement = Arrangement.spacedBy(gap)) {
+        ChoiceDisc(false, size) { g.discard() }
+        ChoiceDisc(true, size) { g.accept() }
+    }
+}
+
+@Composable
+private fun ChoiceDisc(keep: Boolean, size: Dp, onTap: () -> Unit) {
+    val colour = if (keep) DoneGreen else FailedRed
+    Box(
+        Modifier.size(size).clip(CircleShape).background(BadgeFill).border(1.5.dp, colour, CircleShape).clickable(onClick = onTap)
+            .drawBehind {
+                val ink = Stroke(width = 2.5.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                val c = center
+                val u = this.size.minDimension / 34f
+                if (keep) {
+                    val path = androidx.compose.ui.graphics.Path().apply {
+                        moveTo(c.x - 7f * u, c.y + 0.5f * u)
+                        lineTo(c.x - 2f * u, c.y + 5.5f * u)
+                        lineTo(c.x + 7.5f * u, c.y - 5.5f * u)
+                    }
+                    drawPath(path, colour, style = ink)
+                } else {
+                    val d = 6f * u
+                    drawLine(colour, Offset(c.x - d, c.y - d), Offset(c.x + d, c.y + d), ink.width, cap = ink.cap)
+                    drawLine(colour, Offset(c.x - d, c.y + d), Offset(c.x + d, c.y - d), ink.width, cap = ink.cap)
+                }
+            },
+    )
 }
 
 @Composable

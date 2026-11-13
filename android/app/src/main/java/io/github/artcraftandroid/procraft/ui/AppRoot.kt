@@ -153,8 +153,9 @@ fun AppRoot(vm: CanvasViewModel) {
                     val topGlass = BarGlass(barsShown, androidx.compose.ui.geometry.Offset(0f, -height * (1f - barsShown)))
                     TopBar(vm, Modifier.align(Alignment.TopCenter).then(rememberFrost(0.dp, topGlass)).then(up).then(fade))
                     // how the Generate job goes, under its button, while its panel is closed
-                    val generateX = Pc.actionCentre(4, maxWidth)
-                    Box(Modifier.then(up).then(fade)) { GenerateBadge(vm, generateX) }
+                    val generateX = maxWidth - Pc.toolCentreFromRight(-1, maxWidth)
+                    // (filling the screen, so its keep/throw-away buttons are where they're drawn for a touch too)
+                    Box(Modifier.fillMaxSize().then(up).then(fade)) { GenerateBadge(vm, generateX) }
                     val sideBar = Pc.sideBarFit(maxHeight)
                     // a mode taking the screen slides it off its edge, and back when it ends
                     androidx.compose.animation.AnimatedVisibility(
@@ -206,10 +207,10 @@ fun AppRoot(vm: CanvasViewModel) {
                         }
                         Panel.ACTIONS -> 390.dp to 0
                         Panel.ADJUSTMENTS -> 330.dp to 1
-                        Panel.GENERATE -> 400.dp to 4
+                        Panel.GENERATE -> 400.dp to -1
                         Panel.NONE -> 0.dp to 0
                     }
-                    val fromLeft = shown == Panel.ACTIONS || shown == Panel.ADJUSTMENTS || shown == Panel.GENERATE
+                    val fromLeft = shown == Panel.ACTIONS || shown == Panel.ADJUSTMENTS
                     val buttonX = if (fromLeft) Pc.actionCentre(button, maxWidth) else maxWidth - Pc.toolCentreFromRight(button, maxWidth)
                     // panels keep clear of the side bar, on whichever side it is
                     val clear = if (vm.showSideBar) Pc.SideBarWidth + Pc.PopoverGap else Pc.PopoverGap

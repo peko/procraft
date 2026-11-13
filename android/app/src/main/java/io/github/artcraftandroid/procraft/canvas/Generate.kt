@@ -9,7 +9,9 @@ import androidx.lifecycle.viewModelScope
 import io.github.artcraftandroid.procraft.core.ComfyJob
 import io.github.artcraftandroid.procraft.core.ComfyPhase
 import io.github.artcraftandroid.procraft.core.ComfyRequest
+import io.github.artcraftandroid.procraft.core.ComfySource
 import io.github.artcraftandroid.procraft.core.ComfyWorkflow
+import io.github.artcraftandroid.procraft.core.LayerType
 import io.github.artcraftandroid.procraft.core.comfyWorkflows
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -38,7 +40,8 @@ sealed interface BarStatus {
 
 /**
  * Generate: the canvas and a prompt sent to a ComfyUI server through one of the workflows kept there
- * for ProCraft (its `workflows/procraft/`), the picture taken back as a new layer. The core does the
+ * for ProCraft (its `workflows/procraft/`), the picture taken back onto the "AI" layer at the top,
+ * where it waits to be kept ([accept]) or thrown away ([discard]), each new one over the last. The core does the
  * talking ([comfyWorkflows], `comfyGenerate`); this keeps the panel's fields (between runs, in the
  * "generate" preferences) and follows the job.
  */
@@ -52,6 +55,8 @@ class Generate(private val vm: CanvasViewModel, context: Context) {
     /** The seed as typed (the last used while it is random), and whether each job takes a new one. */
     var seed by mutableStateOf(prefs.getString("seed", "0") ?: "0")
     var randomSeed by mutableStateOf(prefs.getBoolean("randomSeed", true))
+    /** What is sent: the current layer alone (true) or the whole canvas. */
+    var currentLayer by mutableStateOf(prefs.getBoolean("currentLayer", false))
     /** Each workflow's negative prompt, by its name (none: the workflow's own). */
     val negatives = mutableStateMapOf<String, String>().apply {
         val kept = runCatching { JSONObject(prefs.getString("negatives", "{}") ?: "{}") }.getOrNull()
@@ -73,6 +78,32 @@ class Generate(private val vm: CanvasViewModel, context: Context) {
     private var outcome by mutableStateOf<Pair<Boolean, Long>?>(null)
 
     val busy: Boolean get() = job != null
+
+    /** A job now refines the canvas (below 100 %), else makes a picture new, as krita-ai-diffusion's Refine and Generate. */
+    val refines: Boolean get() = strength < 1f && (chosen?.takesImage ?: true)
+
+    /** A new picture was put on the AI layer and isn't kept or thrown away yet. */
+    private var waiting by mutableStateOf(false)
+
+    /** A new picture waits on the AI layer to be kept or thrown away (none once undo or a hand takes the layer away). */
+    val pending: Boolean get() = waiting && vm.layers.any { it.kind == LayerType.PAINT && it.name == PREVIEW_LAYER }
+
+    /** The prompt the picture waiting was made from, to name its layer when kept. */
+    private var landedPrompt = ""
+
+    /** Keeps the picture waiting: its layer stays, named for its prompt. */
+    fun accept() {
+        if (vm.acceptGenerated(landedPrompt.ifBlank { prompt.trim() })) {
+            status = "Kept: copied to a layer of its own"
+            waiting = false
+        }
+    }
+
+    /** Throws the picture waiting away, with its layer. */
+    fun discard() {
+        if (vm.discardGenerated()) status = "Thrown away"
+        waiting = false
+    }
 
     /** The chosen workflow as the server listed it. */
     val chosen: ComfyWorkflow? get() = workflows.firstOrNull { it.name == workflow }
@@ -117,6 +148,7 @@ class Generate(private val vm: CanvasViewModel, context: Context) {
             negative = negatives[workflow]?.trim() ?: "",
             strength = strength,
             seed = if (randomSeed) null else typedSeed(),
+            source = if (currentLayer) ComfySource.CURRENT_LAYER else ComfySource.CANVAS,
         )
         val started = s.comfyGenerate(request)
         // the seed it uses shows at once, to keep if the picture is liked
@@ -124,7 +156,7 @@ class Generate(private val vm: CanvasViewModel, context: Context) {
         job = started
         progress = null
         outcome = null
-        status = "Sending the canvas…"
+        status = "Sending…"
         keep()
         following = vm.viewModelScope.launch { follow(started) }
     }
@@ -143,8 +175,13 @@ class Generate(private val vm: CanvasViewModel, context: Context) {
             val st = withContext(Dispatchers.Default) { j.status() }
             when (st.phase) {
                 ComfyPhase.DONE -> {
+                    val sent = j.prompt()
                     val put = vm.putGenerated(j)
-                    ended(put, if (put) "${st.message}: a new layer" else "The picture couldn't go on a new layer")
+                    if (put) {
+                        landedPrompt = sent
+                        waiting = true
+                    }
+                    ended(put, if (put) "${st.message}: on the AI layer. Keep it or throw it away" else "The picture couldn't go on a layer")
                     return
                 }
                 ComfyPhase.FAILED -> {
@@ -196,6 +233,7 @@ class Generate(private val vm: CanvasViewModel, context: Context) {
             .putFloat("strength", strength)
             .putString("seed", typedSeed().toString())
             .putBoolean("randomSeed", randomSeed)
+            .putBoolean("currentLayer", currentLayer)
             .putString("negatives", kept.toString())
             .apply()
     }
@@ -205,6 +243,9 @@ class Generate(private val vm: CanvasViewModel, context: Context) {
 
     companion object {
         const val OUTCOME_SHOWN_MS = 2000L
+
+        /** The name of the layer a picture waits on (the core's `comfy::PREVIEW`). */
+        const val PREVIEW_LAYER = "AI"
 
         private fun reason(e: Throwable): String = when (e) {
             is io.github.artcraftandroid.procraft.core.ComfyException.Failed -> e.reason

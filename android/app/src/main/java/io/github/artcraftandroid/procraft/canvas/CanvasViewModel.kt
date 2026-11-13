@@ -7470,6 +7470,20 @@ class CanvasViewModel(app: Application) : AndroidViewModel(app) {
         return put
     }
 
+    /** Keeps the generated picture on the AI layer: a copy under it, named for [prompt]. */
+    fun acceptGenerated(prompt: String): Boolean {
+        var kept = false
+        layerChange { kept = it.comfyAccept(prompt) != null }
+        return kept
+    }
+
+    /** Throws the generated picture waiting on the AI layer away, with its layer. */
+    fun discardGenerated(): Boolean {
+        var gone = false
+        layerChange { gone = it.comfyDiscard() }
+        return gone
+    }
+
     /**
      * The Generate button tapped: the last prompt again through the last workflow, or, with none
      * chosen yet or a job under way, its panel (held, it always opens the panel).

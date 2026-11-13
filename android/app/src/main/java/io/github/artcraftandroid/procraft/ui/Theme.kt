@@ -132,10 +132,13 @@ object Pc {
     val SwitchFixed: Color get() = pick(0xFF404040, 0xFFD2D2D2)
     val SwitchFixedKnob: Color get() = pick(0xFF525252, 0xFFE9E9E9)
 
-    /** The centre of tool button [index] (0 is the colour button, counting leftwards), from the bar's right edge. */
+    /**
+     * The centre of tool button [index] (0 is the colour button, counting leftwards; -1 is Generate,
+     * right of it at the bar's end), from the bar's right edge.
+     */
     fun toolCentreFromRight(index: Int, barWidth: Dp): Dp {
         val fit = barFit(barWidth)
-        return fit.margin + fit.button / 2 + (fit.button + fit.toolGap) * index
+        return fit.margin + fit.button / 2 + (fit.button + fit.toolGap) * (index + 1)
     }
 
     /** The centre of action button [index] (0 is actions, counting rightwards), from the bar's left edge. */
@@ -205,8 +208,8 @@ object Pc {
 
     /** The top bar's spacing: its margins, the gaps between its tool and action buttons, and how wide those are. */
     data class BarFit(val margin: Dp, val toolGap: Dp, val actionGap: Dp, val button: Dp) {
-        /** The width it takes for the bar's two ends not to meet: Gallery and five actions (Generate the fifth), five tools. */
-        val needs: Dp get() = margin * 2 + GalleryWidth + (button + actionGap) * 5 + button * 5 + toolGap * 4
+        /** The width it takes for the bar's two ends not to meet: Gallery and four actions, five tools and Generate. */
+        val needs: Dp get() = margin * 2 + GalleryWidth + (button + actionGap) * 4 + button * 6 + toolGap * 5
     }
 
     /** Tighter and tighter, for windows too narrow for the measured steps. */

@@ -1,0 +1,227 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "anima/anima_turboV11.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "Model"
+    }
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen306BBaseAnima_1.safetensors",
+      "type": "omnigen2"
+    },
+    "_meta": {
+      "title": "Text encoder"
+    }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "_meta": {
+      "title": "VAE"
+    }
+  },
+  "4": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "2",
+        0
+      ],
+      "text": "masterpiece, best quality, score_7, highres, safe, {prompt}"
+    },
+    "_meta": {
+      "title": "procraft:prompt"
+    }
+  },
+  "5": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "2",
+        0
+      ],
+      "text": "worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, sepia"
+    },
+    "_meta": {
+      "title": "procraft:negative"
+    }
+  },
+  "6": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "procraft_canvas.png"
+    },
+    "_meta": {
+      "title": "procraft:image"
+    }
+  },
+  "7": {
+    "class_type": "ImageScaleToTotalPixels",
+    "inputs": {
+      "image": [
+        "6",
+        0
+      ],
+      "upscale_method": "lanczos",
+      "megapixels": 1.0,
+      "resolution_steps": 16
+    },
+    "_meta": {
+      "title": "Canvas at about 1 MP"
+    }
+  },
+  "8": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "vae": [
+        "3",
+        0
+      ],
+      "pixels": [
+        "7",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "procraft:encode"
+    }
+  },
+  "9": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "_meta": {
+      "title": "procraft:size procraft:empty"
+    }
+  },
+  "10": {
+    "class_type": "BasicGuider",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "conditioning": [
+        "4",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Guider (CFG 1)"
+    }
+  },
+  "11": {
+    "class_type": "BasicScheduler",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "scheduler": "simple",
+      "steps": 8,
+      "denoise": 1.0
+    },
+    "_meta": {
+      "title": "procraft:steps"
+    }
+  },
+  "12": {
+    "class_type": "SplitSigmas",
+    "inputs": {
+      "sigmas": [
+        "11",
+        0
+      ],
+      "step": 1
+    },
+    "_meta": {
+      "title": "procraft:strength"
+    }
+  },
+  "13": {
+    "class_type": "RandomNoise",
+    "inputs": {
+      "noise_seed": 0
+    },
+    "_meta": {
+      "title": "procraft:seed"
+    }
+  },
+  "14": {
+    "class_type": "KSamplerSelect",
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "_meta": {
+      "title": "Sampler"
+    }
+  },
+  "15": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "noise": [
+        "13",
+        0
+      ],
+      "guider": [
+        "10",
+        0
+      ],
+      "sampler": [
+        "14",
+        0
+      ],
+      "sigmas": [
+        "12",
+        1
+      ],
+      "latent_image": [
+        "8",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Sample"
+    }
+  },
+  "16": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "vae": [
+        "3",
+        0
+      ],
+      "samples": [
+        "15",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "Decode"
+    }
+  },
+  "17": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "16",
+        0
+      ],
+      "filename_prefix": "procraft/anima"
+    },
+    "_meta": {
+      "title": "Save"
+    }
+  }
+}

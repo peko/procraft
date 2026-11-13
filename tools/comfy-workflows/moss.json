@@ -1,0 +1,262 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "moss/moss_image_sft_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": {
+      "title": "Model"
+    }
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "moss/qwen3.5_9b_int8_convrot.safetensors",
+      "type": "moss_image"
+    },
+    "_meta": {
+      "title": "Text encoder"
+    }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "flux2-vae.safetensors"
+    },
+    "_meta": {
+      "title": "VAE"
+    }
+  },
+  "4": {
+    "class_type": "LoraLoader",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "clip": [
+        "2",
+        0
+      ],
+      "lora_name": "moss/turbo_sft_8step_dmd_v0_1.safetensors",
+      "strength_model": 1.0,
+      "strength_clip": 1.0
+    },
+    "_meta": {
+      "title": "Turbo LoRA (8 steps, CFG 1)"
+    }
+  },
+  "5": {
+    "class_type": "SkipLayerGuidanceDiTSimple",
+    "inputs": {
+      "model": [
+        "4",
+        0
+      ],
+      "double_layers": "",
+      "single_layers": "22",
+      "start_percent": 0.0,
+      "end_percent": 1.0
+    },
+    "_meta": {
+      "title": "Skip layer 22 (MOSS recipe; acts only with CFG > 1)"
+    }
+  },
+  "6": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "4",
+        1
+      ],
+      "text": "{prompt}"
+    },
+    "_meta": {
+      "title": "procraft:prompt"
+    }
+  },
+  "7": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "4",
+        1
+      ],
+      "text": ""
+    },
+    "_meta": {
+      "title": "procraft:negative"
+    }
+  },
+  "8": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "procraft_canvas.png"
+    },
+    "_meta": {
+      "title": "procraft:image"
+    }
+  },
+  "9": {
+    "class_type": "ImageScaleToTotalPixels",
+    "inputs": {
+      "image": [
+        "8",
+        0
+      ],
+      "upscale_method": "lanczos",
+      "megapixels": 1.0,
+      "resolution_steps": 16
+    },
+    "_meta": {
+      "title": "Canvas at about 1 MP"
+    }
+  },
+  "10": {
+    "class_type": "VAEEncode",
+    "inputs": {
+      "vae": [
+        "3",
+        0
+      ],
+      "pixels": [
+        "9",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "procraft:encode"
+    }
+  },
+  "11": {
+    "class_type": "EmptyFlux2LatentImage",
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "_meta": {
+      "title": "procraft:size procraft:empty"
+    }
+  },
+  "12": {
+    "class_type": "BasicGuider",
+    "inputs": {
+      "model": [
+        "5",
+        0
+      ],
+      "conditioning": [
+        "6",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Guider (CFG 1)"
+    }
+  },
+  "13": {
+    "class_type": "BasicScheduler",
+    "inputs": {
+      "model": [
+        "5",
+        0
+      ],
+      "scheduler": "simple",
+      "steps": 8,
+      "denoise": 1.0
+    },
+    "_meta": {
+      "title": "procraft:steps"
+    }
+  },
+  "14": {
+    "class_type": "SplitSigmas",
+    "inputs": {
+      "sigmas": [
+        "13",
+        0
+      ],
+      "step": 1
+    },
+    "_meta": {
+      "title": "procraft:strength"
+    }
+  },
+  "15": {
+    "class_type": "RandomNoise",
+    "inputs": {
+      "noise_seed": 0
+    },
+    "_meta": {
+      "title": "procraft:seed"
+    }
+  },
+  "16": {
+    "class_type": "KSamplerSelect",
+    "inputs": {
+      "sampler_name": "euler"
+    },
+    "_meta": {
+      "title": "Sampler"
+    }
+  },
+  "17": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "noise": [
+        "15",
+        0
+      ],
+      "guider": [
+        "12",
+        0
+      ],
+      "sampler": [
+        "16",
+        0
+      ],
+      "sigmas": [
+        "14",
+        1
+      ],
+      "latent_image": [
+        "10",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Sample"
+    }
+  },
+  "18": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "vae": [
+        "3",
+        0
+      ],
+      "samples": [
+        "17",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "Decode"
+    }
+  },
+  "19": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "18",
+        0
+      ],
+      "filename_prefix": "procraft/moss"
+    },
+    "_meta": {
+      "title": "Save"
+    }
+  }
+}
